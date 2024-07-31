@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Linux EC2 instance with UserData script that installs Prisma Cloud Defender.
+
+Parameters:
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues: 
+      - t2.micro
+      - t2.small
+      - t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+  EC2InstanceProfile:
+    Description: Name of an Instance Profile to Access Prisma Cloud Secrets
+    Type: String
+    Default: PCSecret
+    ConstraintDescription: Must be the name of an existing EC2 Instance Profile.
+
+  SecretArn:
+    AllowedPattern: '^arn:aws:secretsmanager:(us(-gov)?|ap|ca|cn|eu|sa)-(central|(north|south)?(east|west)?)-\d:(\d{12})?:secret:[\w+=,.@-]{1,128}$'
+    Description: ARN of the Secret where is stored the Access to Prisma Cloud
+    Type: String
+
+  SecretRegion:
+    AllowedPattern: '(us(-gov)?|ap|ca|cn|eu|sa)-(central|(north|south)?(east|west)?)-\d'
+    Description: Region where the Secret is stored
+    Type: String
+
+  RoleArn:
+    AllowedPattern: '^arn:aws:iam::(\d{12})?:role/[\w+=,.@-]{1,128}$'
+    Description: ARN of the Role to be Assumed to Extract the Secret
+    Type: String
+
+  SessionName:
+    AllowedPattern: '[-_a-zA-Z0-9]+'
+    Default: PCSecret3rx5HJvSD1
+    Description: Provide the name of the session to Access to Prisma Cloud Secrets. Maximum 64 characters allowed
+    Type: String
+    MaxLength: 64
+    MinLength: 1
+
+Resources:
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0583d8c7a9c35822c # Update this to the appropriate Windows AMI for your region
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData: 
+        Fn::Base64: !Sub 
+        - |
+          #!/bin/bash
+          # Install AWS CLI, jq and curl (if not installed)
+          not_installed_packages=""
+          if ! command -v curl &> /dev/null; then not_installed_packages+="curl"; fi
+          if ! command -v jq &> /dev/null; then not_installed_packages+=" jq"; fi
+
+          if [[ -n "$not_installed_packages" ]]
+          then
+              echo "Packages $not_installed_packages not installed. Installing pending packages..."
+              if command -v yum > /dev/null 
+              then
+                  sudo yum install -y $not_installed_packages > /dev/null
+              else
+                  sudo apt update &> /dev/null && sudo apt install -y $not_installed_packages &> /dev/null
+              fi
+          fi
+
+          if ! command -v aws &> /dev/null
+          then
+              if ! command -v unzip &> /dev/null
+              then 
+                  echo "Unzip not found. Required for AWS CLI installation. Installing it..."
+                  not_installed_packages+=" unzip"
+                  if command -v yum &> /dev/null 
+                  then
+                      sudo yum install -y unzip
+                  else
+                      sudo apt update &> /dev/null && sudo apt install -y unzip &> /dev/null
+                  fi
+              fi
+              echo "AWS CLI not found. Installing it..."
+              installed_awscli="true"
+              curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip -qq awscliv2.zip
+              sudo ./aws/install &> /dev/null
+          fi
+
+          # Assume role to get access to the Secrets
+          assume_role_credentials=$(aws sts assume-role --role-arn ${ROLE_ARN} --role-session-name ${SESSION_NAME})
+          export AWS_ACCESS_KEY_ID=$(echo $assume_role_credentials | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(echo $assume_role_credentials | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(echo $assume_role_credentials | jq -r '.Credentials.SessionToken')
+
+          # Retrieve Secret from Secrets Manager
+          SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id ${SECRET_ARN} --region ${REGION} --query 'SecretString' --output text)
+
+          # Retriving Prisma Cloud Secrets
+          PCC_URL=$(echo $SECRET_JSON | jq -r '.PCC_URL')
+          PCC_SAN=$(echo $SECRET_JSON | jq -r '.PCC_SAN')
+          PCC_USER=$(echo $SECRET_JSON | jq -r '.PCC_USER')
+          PCC_PASS=$(echo $SECRET_JSON | jq -r '.PCC_PASS')
+          token=$(curl -s -k $PCC_URL/api/v1/authenticate -X POST -H "Content-Type: application/json" -d '{"username":"'"$PCC_USER"'", "password":"'"$PCC_PASS"'"}' | jq -r '.token')
+
+          # Installing defender
+          if sudo docker ps &> /dev/null; then args=""; else args="--install-host"; fi
+          curl -sSL -k --header "authorization: Bearer $token" -X POST $PCC_URL/api/v1/scripts/defender.sh | sudo bash -s -- -c "$PCC_SAN" -m -u $args
+
+          # Removing Installed packages
+          if [[ -n "$installed_awscli" ]] 
+          then
+              echo "Removing AWS CLI since it was not installed..."
+              sudo rm -f awscliv2.zip
+              sudo rm -rf ./aws
+              sudo rm /usr/local/bin/aws 
+              sudo rm /usr/local/bin/aws_completer 
+              sudo rm -rf /usr/local/aws-cli
+          fi
+
+          if [[ -n "$not_installed_packages" ]]
+          then
+              echo "Removing the packages $not_installed_packages since were not installed..."
+              if command -v yum > /dev/null
+              then
+                  sudo yum remove -y $not_installed_packages &> /dev/null
+              else
+                  sudo apt remove -y $not_installed_packages &> /dev/null
+              fi
+          fi
+        - SECRET_ARN: !Ref SecretArn
+          REGION: !Ref SecretRegion
+          ROLE_ARN: !Ref RoleArn
+          SESSION_NAME: !Ref SessionName
