@@ -41,3 +41,5 @@ Now you can create the EC2 Instance using either the templates from the LinuxEC2
 - SessionName: Name of the session to be used while assuming the Master Role.
 - AMIId: Id of the AMI to be launched.
 
+Note: This templates can be  modified to suit your needs. Te Security group can be added, but this as for the moment will use the default security group.
+
