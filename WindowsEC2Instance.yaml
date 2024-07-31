@@ -47,13 +47,18 @@ Parameters:
     MaxLength: 64
     MinLength: 1
 
+  AMIId:
+    AllowedPattern: '^ami-[0-9a-f]{1,18}$'
+    Description: AMI ID used to deploy the EC2 Instance
+    Type: String
+
 Resources:
-  MyEC2Instance:
+  WindowsEC2Instance:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref InstanceType
       KeyName: !Ref KeyName
-      ImageId: ami-07d9456e59793a7d5 # Update this to the appropriate Windows AMI for your region
+      ImageId: !Ref AMIId # Update this to the appropriate Windows AMI for your region
       IamInstanceProfile: !Ref EC2InstanceProfile
       UserData: 
         Fn::Base64: !Sub
